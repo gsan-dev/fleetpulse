@@ -57,7 +57,7 @@ Requiere Docker. Levanta TimescaleDB, Redis, el servidor y el dashboard con
 un único comando:
 
 ```bash
-git clone https://github.com/<tu-usuario>/fleetpulse.git
+git clone https://github.com/gsan-dev/fleetpulse.git
 cd fleetpulse
 docker compose up -d --build
 ```
@@ -115,7 +115,7 @@ antemano la **dirección del servidor** (`host:puerto`, por defecto puerto
 ### Linux (systemd) — sin Docker
 
 ```bash
-curl -sSL https://raw.githubusercontent.com/<tu-usuario>/fleetpulse/main/install/install.sh | sudo bash -s -- \
+curl -sSL https://raw.githubusercontent.com/gsan-dev/fleetpulse/main/install/install.sh | sudo bash -s -- \
   --token=TU_TOKEN_SECRETO --server=IP_DEL_SERVIDOR:50051
 ```
 
@@ -130,7 +130,7 @@ journalctl -u fleetpulse-agent -f
 ### Windows (servicio nativo) — PowerShell como Administrador
 
 ```powershell
-irm https://raw.githubusercontent.com/<tu-usuario>/fleetpulse/main/install/install.ps1 -OutFile install.ps1
+irm https://raw.githubusercontent.com/gsan-dev/fleetpulse/main/install/install.ps1 -OutFile install.ps1
 .\install.ps1 -Token TU_TOKEN_SECRETO -Server IP_DEL_SERVIDOR:50051
 ```
 
@@ -145,7 +145,7 @@ Get-Service FleetPulseAgent
 ### Docker (cualquier SO con Docker: Linux, Windows, macOS)
 
 ```bash
-git clone https://github.com/<tu-usuario>/fleetpulse.git && cd fleetpulse
+git clone https://github.com/gsan-dev/fleetpulse.git && cd fleetpulse
 docker build -f cmd/fleetpulse-agent/Dockerfile -t fleetpulse-agent .
 docker run -d --name fleetpulse-agent --restart unless-stopped \
   -e FLEETPULSE_SERVER=IP_DEL_SERVIDOR:50051 \
@@ -168,7 +168,7 @@ No hay instalador nativo (tipo `launchd`) todavía, pero el binario compila y
 funciona igual que en el resto de plataformas:
 
 ```bash
-git clone https://github.com/<tu-usuario>/fleetpulse.git && cd fleetpulse
+git clone https://github.com/gsan-dev/fleetpulse.git && cd fleetpulse
 go build -o fleetpulse-agent ./cmd/fleetpulse-agent
 ./fleetpulse-agent --server=IP_DEL_SERVIDOR:50051 --token=TU_TOKEN_SECRETO
 ```
