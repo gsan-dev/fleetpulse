@@ -1,60 +1,63 @@
 # FleetPulse
 
-Plataforma self-hosted de monitorización agente-servidor para flotas heterogéneas
-(Linux, Windows, Raspberry Pi) y orquestadores (Docker, Kubernetes).
+Self-hosted agent-server monitoring platform for heterogeneous fleets
+(Linux, Windows, Raspberry Pi) and orchestrators (Docker, Kubernetes).
 
-Un **servidor central** (recolector + dashboard) recibe telemetría de **agentes**
-que instalas en cada máquina que quieras vigilar. Un agente por máquina, un
-servidor para toda la flota — el agente funciona igual en Linux, Windows,
-macOS, dentro de un contenedor Docker o como Pod de Kubernetes.
+A **central server** (collector + dashboard) receives telemetry from
+**agents** you install on every machine you want to watch. One agent per
+machine, one server for the whole fleet — the agent works the same way on
+Linux, Windows, macOS, inside a Docker container, or as a Kubernetes Pod.
 
-La especificación original está en [config/system.md](config/system.md). Este
-documento es la referencia de cómo está construido y cómo ponerlo en marcha.
+Repository: **https://github.com/gsan-dev/fleetpulse**
 
-## Arquitectura
+The original spec lives in
+[config/system.md](https://github.com/gsan-dev/fleetpulse/blob/main/config/system.md).
+This document is the reference for how it's built and how to run it.
+
+## Architecture
 
 ```mermaid
 flowchart LR
-    subgraph Nodo["Nodo (Linux / Windows / macOS / K8s Pod)"]
-        OS["gopsutil<br/>(CPU, RAM, disco, red)"]
-        RT["Docker SDK / API de Kubelet"]
+    subgraph Node["Node (Linux / Windows / macOS / K8s Pod)"]
+        OS["gopsutil<br/>(CPU, RAM, disk, network)"]
+        RT["Docker SDK / Kubelet API"]
         AG["fleetpulse-agent"]
         OS --> AG
         RT --> AG
     end
 
-    AG -- "gRPC + mTLS o token<br/>(Register, PushMetrics,<br/>StreamCommands)" --> SRV
+    AG -- "gRPC + mTLS or token<br/>(Register, PushMetrics,<br/>StreamCommands)" --> SRV
 
-    subgraph Servidor["Servidor central"]
+    subgraph Server["Central server"]
         SRV["fleetpulse-server"]
-        SRV --> PG["TimescaleDB / PostgreSQL<br/>(nodos, métricas, contenedores)"]
-        SRV --> RD["Redis<br/>(heartbeat compartido, opcional)"]
-        SRV --> WH["Telegram / Discord<br/>(webhooks de alerta)"]
+        SRV --> PG["TimescaleDB / PostgreSQL<br/>(nodes, metrics, containers)"]
+        SRV --> RD["Redis<br/>(shared heartbeat, optional)"]
+        SRV --> WH["Telegram / Discord<br/>(alert webhooks)"]
     end
 
-    SRV -- "REST + SSE" --> WEB["Dashboard Next.js"]
+    SRV -- "REST + SSE" --> WEB["Next.js dashboard"]
 ```
 
-Cada agente abre **tres** canales gRPC de larga duración hacia el servidor:
-`PushMetrics` (telemetría, actúa también como heartbeat), `StreamCommands`
-(el servidor empuja reinicios/logs sin que el agente exponga ningún puerto
-entrante) y llamadas puntuales a `Register`/`ReportCommandResult`. El
-dashboard nunca habla con los agentes directamente: todo pasa por la API
-HTTP/SSE del servidor. El agente solo necesita salida hacia el servidor
-(puerto 50051 por defecto); no hace falta abrir nada entrante en los nodos
-que monitorizas, aunque estén detrás de NAT o un firewall.
+Each agent opens **three** long-lived gRPC channels to the server:
+`PushMetrics` (telemetry, which also doubles as a heartbeat), `StreamCommands`
+(the server pushes restarts/logs without the agent ever exposing an inbound
+port) and one-off calls to `Register`/`ReportCommandResult`. The dashboard
+never talks to agents directly: everything goes through the server's
+HTTP/SSE API. The agent only needs outbound access to the server (port
+50051 by default); nothing needs to be opened inbound on the machines you
+monitor, even behind NAT or a firewall.
 
 ---
 
-## 1. Levantar el servidor
+## 1. Launch the server
 
-Necesitas **uno** (y solo uno) en toda tu flota: es el punto central al que
-todos los agentes reportan. Elige una opción.
+You need **one** (and only one) for your whole fleet: it's the central
+point every agent reports to. Pick one option.
 
-### Opción A — Docker Compose (recomendado)
+### Option A — Docker Compose (recommended)
 
-Requiere Docker. Levanta TimescaleDB, Redis, el servidor y el dashboard con
-un único comando:
+Requires Docker. Brings up TimescaleDB, Redis, the server, and the dashboard
+with a single command:
 
 ```bash
 git clone https://github.com/gsan-dev/fleetpulse.git
@@ -62,137 +65,139 @@ cd fleetpulse
 docker compose up -d --build
 ```
 
-Dashboard en **http://localhost:3000**. Token de agente de prueba: `demo-token`
-(cámbialo antes de exponer esto a nada que no sea tu propia LAN — ver
-`AGENT_TOKENS` en `docker-compose.yml`).
+Dashboard at **http://localhost:3000**. Test agent token: `demo-token`
+(change it before exposing this to anything beyond your own LAN — see
+`AGENT_TOKENS` in
+[docker-compose.yml](https://github.com/gsan-dev/fleetpulse/blob/main/docker-compose.yml)).
 
-Si algún puerto (8080, 3000, 5432, 6379) ya está en uso en tu máquina,
-remapea el lado izquierdo en `docker-compose.yml` (p. ej. `"8090:8080"`) y
-ajusta `NEXT_PUBLIC_API_URL` del servicio `web` para que apunte al puerto
-que elijas.
+If any port (8080, 3000, 5432, 6379) is already in use on your machine,
+remap the left-hand side in `docker-compose.yml` (e.g. `"8090:8080"`) and
+point the `web` service's `NEXT_PUBLIC_API_URL` at whichever port you pick.
 
-### Opción B — Binario nativo (sin Docker)
+### Option B — Native binary (no Docker)
 
-Requisitos: Go 1.26+, y PostgreSQL/TimescaleDB + Redis accesibles (o arranca
-en modo memoria para probar, ver más abajo).
+Requirements: Go 1.26+, and a reachable PostgreSQL/TimescaleDB + Redis (or
+start in memory mode to try it out, see below).
 
 ```bash
-make build-server   # o: go build -o bin/fleetpulse-server ./cmd/fleetpulse-server
+make build-server   # or: go build -o bin/fleetpulse-server ./cmd/fleetpulse-server
 ./bin/fleetpulse-server \
-  --database-url=postgres://usuario:pass@localhost:5432/fleetpulse \
+  --database-url=postgres://user:pass@localhost:5432/fleetpulse \
   --redis-url=redis://localhost:6379/0 \
-  --tokens=TU_TOKEN_SECRETO
+  --tokens=YOUR_SECRET_TOKEN
 ```
 
-Para probar sin levantar ninguna base de datos (todo en memoria del proceso,
-se pierde al reiniciar el servidor — solo para pruebas, nunca en producción):
+To try it without any database at all (everything kept in the process's
+memory, lost on restart — for testing only, never for production):
 
 ```bash
 ./bin/fleetpulse-server --storage=memory --tokens=dev-token
 ```
 
-El dashboard es una app Next.js aparte; con el servidor ya escuchando en
-`--http-addr` (por defecto `:8080`):
+The dashboard is a separate Next.js app; once the server is listening on
+`--http-addr` (`:8080` by default):
 
 ```bash
 cd web
-cp .env.example .env.local   # ajusta NEXT_PUBLIC_API_URL si no es localhost:8080
+cp .env.example .env.local   # adjust NEXT_PUBLIC_API_URL if it isn't localhost:8080
 npm install
-npm run build && npm start   # o `npm run dev` durante desarrollo
+npm run build && npm start   # or `npm run dev` during development
 ```
 
-Todas las variables de configuración del servidor están en la
-[tabla de más abajo](#configuración-del-servidor).
+All server configuration variables are in the
+[table further down](#server-configuration).
 
 ---
 
-## 2. Levantar el agente — en cualquier máquina, en cualquier momento
+## 2. Launch the agent — on any machine, at any time
 
-Instala uno por cada máquina que quieras ver en el panel. Necesitas de
-antemano la **dirección del servidor** (`host:puerto`, por defecto puerto
-`50051`) y el **token** que configuraste en `AGENT_TOKENS`.
+Install one per machine you want to see in the dashboard. You'll need
+beforehand the **server address** (`host:port`, port `50051` by default) and
+the **token** you configured in `AGENT_TOKENS`.
 
-### Linux (systemd) — sin Docker
+### Linux (systemd) — no Docker
 
 ```bash
 curl -sSL https://raw.githubusercontent.com/gsan-dev/fleetpulse/main/install/install.sh | sudo bash -s -- \
-  --token=TU_TOKEN_SECRETO --server=IP_DEL_SERVIDOR:50051
+  --token=YOUR_SECRET_TOKEN --server=YOUR_SERVER_IP:50051
 ```
 
-Instala el binario, crea el servicio `fleetpulse-agent.service` y lo arranca
-con `systemctl enable --now`. Ver estado y logs:
+Installs the binary, creates the `fleetpulse-agent.service` unit, and starts
+it with `systemctl enable --now`. Check status and logs:
 
 ```bash
 systemctl status fleetpulse-agent
 journalctl -u fleetpulse-agent -f
 ```
 
-### Windows (servicio nativo) — PowerShell como Administrador
+### Windows (native service) — PowerShell as Administrator
 
 ```powershell
 irm https://raw.githubusercontent.com/gsan-dev/fleetpulse/main/install/install.ps1 -OutFile install.ps1
-.\install.ps1 -Token TU_TOKEN_SECRETO -Server IP_DEL_SERVIDOR:50051
+.\install.ps1 -Token YOUR_SECRET_TOKEN -Server YOUR_SERVER_IP:50051
 ```
 
-Registra el servicio `FleetPulseAgent` en el Service Control Manager
-(arranque automático, sobrevive a reinicios). El token se guarda en el
-registro del propio servicio, no como argumento visible. Comprobar estado:
+Registers the `FleetPulseAgent` service with the Service Control Manager
+(starts automatically, survives reboots). The token is stored in the
+service's own registry key, never as a visible argument. Check status:
 
 ```powershell
 Get-Service FleetPulseAgent
 ```
 
-### Docker (cualquier SO con Docker: Linux, Windows, macOS)
+### Docker (any OS with Docker: Linux, Windows, macOS)
 
 ```bash
 git clone https://github.com/gsan-dev/fleetpulse.git && cd fleetpulse
 docker build -f cmd/fleetpulse-agent/Dockerfile -t fleetpulse-agent .
 docker run -d --name fleetpulse-agent --restart unless-stopped \
-  -e FLEETPULSE_SERVER=IP_DEL_SERVIDOR:50051 \
-  -e AGENT_TOKEN=TU_TOKEN_SECRETO \
+  -e FLEETPULSE_SERVER=YOUR_SERVER_IP:50051 \
+  -e AGENT_TOKEN=YOUR_SECRET_TOKEN \
   -e FLEETPULSE_HOSTNAME=$(hostname) \
   -v /var/run/docker.sock:/var/run/docker.sock:ro \
   -v fleetpulse-agent-state:/var/lib/fleetpulse \
   fleetpulse-agent
 ```
 
-`FLEETPULSE_HOSTNAME` es importante: sin él, el panel mostraría el ID del
-contenedor (algo como `6931b28a9112`) en vez del nombre real de la máquina,
-porque así es como Docker le asigna el hostname por defecto a un contenedor.
-El montaje de `docker.sock` es opcional — solo hace falta si quieres que el
-agente también reporte los contenedores de esa máquina.
+`FLEETPULSE_HOSTNAME` matters: without it, the dashboard would show the
+container's ID (something like `6931b28a9112`) as the node name, because
+that's the hostname Docker assigns a container by default. Mounting
+`docker.sock` is optional — only needed if you also want the agent to
+report that machine's containers.
 
-### macOS / cualquier sistema con Go — manual
+### macOS / any system with Go — manual
 
-No hay instalador nativo (tipo `launchd`) todavía, pero el binario compila y
-funciona igual que en el resto de plataformas:
+There's no native installer (`launchd`) yet, but the binary compiles and
+runs the same as on every other platform:
 
 ```bash
 git clone https://github.com/gsan-dev/fleetpulse.git && cd fleetpulse
 go build -o fleetpulse-agent ./cmd/fleetpulse-agent
-./fleetpulse-agent --server=IP_DEL_SERVIDOR:50051 --token=TU_TOKEN_SECRETO
+./fleetpulse-agent --server=YOUR_SERVER_IP:50051 --token=YOUR_SECRET_TOKEN
 ```
 
-Para que sobreviva a un reinicio necesitarás gestionarlo tú (un `.plist` de
-`launchd`, `screen`/`tmux`, o cualquier supervisor de procesos que ya uses).
+To survive a reboot you'll need to manage that yourself (a `launchd`
+`.plist`, `screen`/`tmux`, or whatever process supervisor you already use).
 
-### Kubernetes (DaemonSet — un agente por nodo del clúster)
+### Kubernetes (DaemonSet — one agent per cluster node)
 
 ```bash
-kubectl create secret generic fleetpulse-token --from-literal=token=TU_TOKEN_SECRETO
+kubectl create secret generic fleetpulse-token --from-literal=token=YOUR_SECRET_TOKEN
 helm install fleetpulse-agent deploy/helm/fleetpulse-agent \
-  --set server.address=IP_DEL_SERVIDOR:50051 \
+  --set server.address=YOUR_SERVER_IP:50051 \
   --set server.tokenSecretName=fleetpulse-token
 ```
 
-El agente detecta automáticamente que corre dentro de un Pod
-(variable `KUBERNETES_SERVICE_HOST`, que Kubernetes inyecta siempre) y usa la
-API del kubelet en vez de Docker para leer los contenedores del nodo.
+Chart:
+[deploy/helm/fleetpulse-agent](https://github.com/gsan-dev/fleetpulse/tree/main/deploy/helm/fleetpulse-agent).
+The agent automatically detects that it's running inside a Pod (the
+`KUBERNETES_SERVICE_HOST` variable, which Kubernetes always injects) and
+uses the kubelet API instead of Docker to read the node's containers.
 
-### Probar sin servidor (depuración local)
+### Try it without a server (local debugging)
 
-Una sola muestra por stdout, sin necesidad de servidor ni token — útil para
-comprobar que el binario detecta bien el sistema y (si lo tiene) Docker:
+A single sample printed to stdout, no server or token required — useful to
+confirm the binary detects the system (and Docker, if present) correctly:
 
 ```bash
 ./fleetpulse-agent --once --log-level debug
@@ -200,185 +205,190 @@ comprobar que el binario detecta bien el sistema y (si lo tiene) Docker:
 
 ---
 
-## Estado del roadmap
+## Roadmap status
 
-| Fase | Contenido | Estado |
+| Phase | Content | Status |
 |---|---|---|
-| 1 | Núcleo del agente en Go (gopsutil, Docker SDK, protobuf) | ✅ |
-| 2 | Servidor recolector gRPC + persistencia (TimescaleDB, Redis) | ✅ |
-| 3 | Dashboard Next.js en tiempo real | ✅ |
-| 4 | Alertas + modo DaemonSet de Kubernetes | ✅ |
-| 5 | Empaquetado, CI/CD y documentación | ✅ |
+| 1 | Go agent core (gopsutil, Docker SDK, protobuf) | ✅ |
+| 2 | gRPC collector server + persistence (TimescaleDB, Redis) | ✅ |
+| 3 | Real-time Next.js dashboard | ✅ |
+| 4 | Alerting + Kubernetes DaemonSet mode | ✅ |
+| 5 | Packaging, CI/CD, and documentation | ✅ |
 
-Ver [Estado de verificación](#estado-de-verificación) para lo que se ha
-probado contra infraestructura real y lo que sigue pendiente.
+See [Verification status](#verification-status) for what's been tested
+against real infrastructure and what's still pending.
 
-## Estructura del repositorio
+## Repository layout
 
 ```
-cmd/fleetpulse-agent/     Binario del agente (demonio / servicio)
-cmd/fleetpulse-server/    Binario del recolector central
-internal/collector/       Métricas de sistema (gopsutil), Docker SDK y API de Kubelet
-internal/config/          Configuración del agente (flags + env)
-internal/identity/        Huella del nodo y agent_id persistente
-internal/telemetry/       Dominio del agente -> protobuf
-internal/transport/       Cliente gRPC del agente (Register, PushMetrics, TLS/mTLS)
-internal/commands/        Ejecutor de comandos del agente (reinicio, logs bajo demanda)
-internal/serverconfig/    Configuración del servidor (flags + env)
-internal/store/           Interfaz de persistencia + memstore (demo/tests) + pgstore (Postgres/Timescale)
-internal/heartbeat/       Watchdog de conectividad (memoria o Redis)
-internal/alert/           Canales de alerta (Telegram, Discord)
-internal/grpcserver/      Implementación del servicio gRPC (lado servidor)
-internal/rpcauth/         Autenticación por token compartida entre agente y servidor
-internal/commandbus/      Enrutado de comandos servidor -> agente
-internal/hub/             Difusión en vivo (SSE) de métricas
-internal/api/             API REST + SSE para el dashboard
-proto/fleetpulse/v1/      Contrato gRPC/protobuf · gen/ es el código generado (no editar a mano)
-web/                      Dashboard Next.js (App Router, TypeScript, Tailwind, Recharts)
-deploy/helm/              Chart de Kubernetes (DaemonSet del agente)
-install/                  Instaladores de una línea (Linux systemd, Windows servicio nativo)
-.github/workflows/        CI (test/build/lint) y Release (binarios + imágenes)
-docker-compose.yml        Stack completo de demostración local
+cmd/fleetpulse-agent/     Agent binary (daemon / service)
+cmd/fleetpulse-server/    Central collector binary
+internal/collector/       System metrics (gopsutil), Docker SDK, and Kubelet API
+internal/config/          Agent configuration (flags + env)
+internal/identity/        Node fingerprint and persistent agent_id
+internal/telemetry/       Agent domain -> protobuf
+internal/transport/       Agent's gRPC client (Register, PushMetrics, TLS/mTLS)
+internal/commands/        Agent's remote command executor (restart, on-demand logs)
+internal/serverconfig/    Server configuration (flags + env)
+internal/store/           Persistence interface + memstore (demo/tests) + pgstore (Postgres/Timescale)
+internal/heartbeat/       Connectivity watchdog (memory or Redis)
+internal/alert/           Alert channels (Telegram, Discord)
+internal/grpcserver/      gRPC service implementation (server side)
+internal/rpcauth/         Shared token authentication between agent and server
+internal/commandbus/      Server -> agent command routing
+internal/hub/             Live (SSE) metrics broadcast
+internal/api/             REST + SSE API for the dashboard
+proto/fleetpulse/v1/      gRPC/protobuf contract · gen/ is generated code (do not edit by hand)
+web/                      Next.js dashboard (App Router, TypeScript, Tailwind, Recharts)
+deploy/helm/              Kubernetes chart (agent DaemonSet)
+install/                  One-line installers (Linux systemd, native Windows service)
+.github/workflows/        CI (test/build/lint) and Release (binaries + images)
+docker-compose.yml        Full local demo stack
 ```
 
-## Desarrollo / compilar desde el código
+## Development / building from source
 
-Requisitos: Go 1.26+, Node.js 22+. Para regenerar el protobuf hace falta
-`buf` y sus plugins (`make tools`).
+Requirements: Go 1.26+, Node.js 22+. Regenerating the protobuf needs `buf`
+and its plugins (`make tools`).
 
 ```bash
-make tools     # solo la primera vez
-make proto     # genera gen/ a partir de proto/
+make tools     # first time only
+make proto     # generates gen/ from proto/
 make tidy
-make test      # go test ./... -race (sin -race si no hay compilador de C)
+make test      # go test ./... -race (drop -race if no C compiler is available)
 make build build-server
 make web-install web-build
 ```
 
-`make build-linux` / `make build-windows` cross-compilan el agente para
-release sin necesidad de esas plataformas.
+`make build-linux` / `make build-windows` cross-compile the agent for
+release without needing those platforms.
 
-## Configuración del agente
+## Agent configuration
 
-| Flag | Variable | Por defecto | Descripción |
+| Flag | Variable | Default | Description |
 |---|---|---|---|
-| `--server` | `FLEETPULSE_SERVER` | — | `host:puerto` gRPC del recolector |
-| `--token` | `AGENT_TOKEN` | — | Token de alta del agente |
-| `--interval` | `FLEETPULSE_INTERVAL` | `15s` | Cadencia de envío (el servidor puede imponer otra al registrar) |
-| `--docker` | `FLEETPULSE_DOCKER` | `auto` | `auto`, `on` u `off` |
-| `--runtime` | `FLEETPULSE_RUNTIME` | `auto` | `auto`, `docker` o `kubernetes` |
-| `--state-dir` | `FLEETPULSE_STATE_DIR` | `/var/lib/fleetpulse` (root en Linux) | Dónde se persiste el `agent_id` |
-| `--tls-ca` | `FLEETPULSE_TLS_CA` | — | CA para verificar el servidor (activa TLS) |
-| `--tls-cert` / `--tls-key` | `FLEETPULSE_TLS_CERT` / `FLEETPULSE_TLS_KEY` | — | Certificado de cliente (mTLS) |
+| `--server` | `FLEETPULSE_SERVER` | — | `host:port` of the gRPC collector |
+| `--token` | `AGENT_TOKEN` | — | Agent enrollment token |
+| `--interval` | `FLEETPULSE_INTERVAL` | `15s` | Push cadence (the server may impose a different one on registration) |
+| `--docker` | `FLEETPULSE_DOCKER` | `auto` | `auto`, `on`, or `off` |
+| `--runtime` | `FLEETPULSE_RUNTIME` | `auto` | `auto`, `docker`, or `kubernetes` |
+| `--state-dir` | `FLEETPULSE_STATE_DIR` | `/var/lib/fleetpulse` (root on Linux) | Where the `agent_id` is persisted |
+| `--tls-ca` | `FLEETPULSE_TLS_CA` | — | CA to verify the server (enables TLS) |
+| `--tls-cert` / `--tls-key` | `FLEETPULSE_TLS_CERT` / `FLEETPULSE_TLS_KEY` | — | Client certificate (mTLS) |
 | `--log-level` | `FLEETPULSE_LOG_LEVEL` | `info` | `debug`, `info`, `warn`, `error` |
-| `--hostname` | `FLEETPULSE_HOSTNAME` | — | Nombre del nodo a reportar; sustituye al autodetectado |
-| `--once` | — | `false` | Una muestra por stdout y salir |
+| `--hostname` | `FLEETPULSE_HOSTNAME` | — | Node name to report; overrides autodetection |
+| `--once` | — | `false` | Print one sample to stdout and exit |
 
-> **Agente en Docker**: fija siempre `FLEETPULSE_HOSTNAME` (ver
-> [sección anterior](#docker-cualquier-so-con-docker-linux-windows-macos)) —
-> si no, el panel muestra el ID del contenedor en vez del nombre real de la
-> máquina.
+> **Agent in Docker**: always set `FLEETPULSE_HOSTNAME` (see the
+> [section above](#docker-any-os-with-docker-linux-windows-macos)) —
+> otherwise the dashboard shows the container's ID instead of the machine's
+> real name.
 
-`--server` y `--token` son obligatorios salvo en modo `--once`.
-`fleetpulse-agent service install|uninstall|start|stop` gestiona el
-servicio nativo en Windows.
+`--server` and `--token` are required except in `--once` mode.
+`fleetpulse-agent service install|uninstall|start|stop` manages the native
+Windows service.
 
-## Configuración del servidor
+## Server configuration
 
-| Flag | Variable | Por defecto | Descripción |
+| Flag | Variable | Default | Description |
 |---|---|---|---|
-| `--grpc-addr` | `FLEETPULSE_GRPC_ADDR` | `:50051` | Escucha gRPC (agentes) |
-| `--http-addr` | `FLEETPULSE_HTTP_ADDR` | `:8080` | Escucha HTTP/SSE (dashboard) |
-| `--storage` | `FLEETPULSE_STORAGE` | `postgres` | `postgres` o `memory` (demo, no persiste) |
-| `--database-url` | `DATABASE_URL` | — | DSN de PostgreSQL/TimescaleDB |
-| `--redis-url` | `REDIS_URL` | — | Backend de heartbeat compartido entre réplicas (opcional; por defecto en memoria del proceso) |
-| `--tokens` | `AGENT_TOKENS` | — | Tokens de agente válidos, separados por comas |
-| `--heartbeat-timeout` | `FLEETPULSE_HEARTBEAT_TIMEOUT` | `45s` | Tiempo sin métricas antes de marcar `Unreachable` |
-| `--tls-cert` / `--tls-key` | `FLEETPULSE_TLS_CERT` / `FLEETPULSE_TLS_KEY` | — | TLS del listener gRPC |
-| `--tls-client-ca` | `FLEETPULSE_TLS_CLIENT_CA` | — | Exige mTLS a los agentes |
-| `--dashboard-token` | `FLEETPULSE_DASHBOARD_TOKEN` | — | Protege la API HTTP (vacío = sin auth, LAN de confianza) |
-| — | `FLEETPULSE_TELEGRAM_BOT_TOKEN` / `FLEETPULSE_TELEGRAM_CHAT_ID` | — | Alertas por Telegram |
-| — | `FLEETPULSE_DISCORD_WEBHOOK_URL` | — | Alertas por Discord |
+| `--grpc-addr` | `FLEETPULSE_GRPC_ADDR` | `:50051` | gRPC listener (agents) |
+| `--http-addr` | `FLEETPULSE_HTTP_ADDR` | `:8080` | HTTP/SSE listener (dashboard) |
+| `--storage` | `FLEETPULSE_STORAGE` | `postgres` | `postgres` or `memory` (demo, non-persistent) |
+| `--database-url` | `DATABASE_URL` | — | PostgreSQL/TimescaleDB DSN |
+| `--redis-url` | `REDIS_URL` | — | Shared heartbeat backend across replicas (optional; defaults to in-process memory) |
+| `--tokens` | `AGENT_TOKENS` | — | Valid agent tokens, comma-separated |
+| `--heartbeat-timeout` | `FLEETPULSE_HEARTBEAT_TIMEOUT` | `45s` | Time without metrics before marking `Unreachable` |
+| `--tls-cert` / `--tls-key` | `FLEETPULSE_TLS_CERT` / `FLEETPULSE_TLS_KEY` | — | TLS for the gRPC listener |
+| `--tls-client-ca` | `FLEETPULSE_TLS_CLIENT_CA` | — | Require mTLS from agents |
+| `--dashboard-token` | `FLEETPULSE_DASHBOARD_TOKEN` | — | Protects the HTTP API (empty = no auth, trusted LAN) |
+| — | `FLEETPULSE_TELEGRAM_BOT_TOKEN` / `FLEETPULSE_TELEGRAM_CHAT_ID` | — | Telegram alerts |
+| — | `FLEETPULSE_DISCORD_WEBHOOK_URL` | — | Discord alerts |
 
 ## Dashboard
 
-Variables en `web/.env.local` (ver `web/.env.example`):
+Variables in `web/.env.local` (see
+[web/.env.example](https://github.com/gsan-dev/fleetpulse/blob/main/web/.env.example)):
 
-| Variable | Descripción |
+| Variable | Description |
 |---|---|
-| `NEXT_PUBLIC_API_URL` | URL del servidor (`http://localhost:8080` en desarrollo) |
-| `NEXT_PUBLIC_API_TOKEN` | Solo si el servidor exige `--dashboard-token` |
+| `NEXT_PUBLIC_API_URL` | Server URL (`http://localhost:8080` in development) |
+| `NEXT_PUBLIC_API_TOKEN` | Only if the server requires `--dashboard-token` |
 
-El dashboard habla **directamente** con la API Go desde el navegador (no hay
-proxy de Next.js de por medio), así que `NEXT_PUBLIC_*` queda visible en el
-bundle — modelo de amenaza correcto para una LAN de confianza; si se expone a
-internet hace falta algo más (proxy con su propia autenticación, red privada).
+The dashboard talks **directly** to the Go API from the browser (there's no
+Next.js proxy in between), so `NEXT_PUBLIC_*` is visible in the bundle —
+the right threat model for a trusted LAN; exposing this to the internet
+needs something more (a proxy with its own auth, a private network).
 
-## Decisiones de diseño
+## Design decisions
 
-- **El `agent_id` lo genera el cliente** y se persiste en el state dir. Un
-  reintento de registro tras perderse la respuesta del servidor no duplica el
-  nodo en el panel.
-- **La IP pública la deriva el servidor** del peer gRPC en vez de aceptarla
-  del agente: un campo enviado por el cliente puede falsearse.
-- **Autenticación por token en cada llamada gRPC** (metadatos, interceptor
-  compartido en `internal/rpcauth`), no solo en `Register`: cubre también el
-  stream de métricas y el canal de comandos con el mismo mecanismo.
-- **El heartbeat vive aparte del histórico**: memoria del proceso por
-  defecto, Redis opcional para varias réplicas del servidor. Mismo patrón
-  `auto/on/off` que ya usa el agente para Docker, por consistencia.
-- **Los comandos servidor→agente van por un stream que abre el agente**
-  (`StreamCommands`), nunca al revés: el agente no necesita exponer ningún
-  puerto entrante, clave para nodos detrás de NAT/firewall.
-- **Kubelet y Docker comparten la misma interfaz** (`collector.ContainerSource`)
-  en el agente: el colector, el estado de salud y el payload de métricas no
-  saben ni les importa qué runtime hay debajo.
-- **La memoria de contenedor descuenta la cache de página** (`inactive_file`
-  en cgroup v2, `cache` en v1), igual que `docker stats`.
+- **The `agent_id` is generated by the client** and persisted in the state
+  dir. Retrying registration after a lost server response doesn't duplicate
+  the node in the dashboard.
+- **The public IP is derived by the server** from the gRPC peer instead of
+  trusting the agent's own report: a field sent by the client can be spoofed.
+- **Token authentication on every gRPC call** (metadata, shared interceptor
+  in `internal/rpcauth`), not just on `Register`: it also covers the metrics
+  stream and the command channel with the same mechanism.
+- **Heartbeat lives apart from the history**: in-process memory by default,
+  optional Redis for multiple server replicas. Same `auto/on/off` pattern
+  the agent already uses for Docker, for consistency.
+- **Server → agent commands travel over a stream the agent opens**
+  (`StreamCommands`), never the other way around: the agent never needs to
+  expose an inbound port, which matters behind NAT/firewalls.
+- **Kubelet and Docker share the same interface**
+  (`collector.ContainerSource`) in the agent: the collector, the health
+  state, and the metrics payload neither know nor care which runtime is
+  underneath.
+- **Container memory subtracts page cache** (`inactive_file` on cgroup v2,
+  `cache` on v1), the same way `docker stats` does.
 
-## Estado de verificación
+## Verification status
 
-Lo que se ha probado de verdad, no solo "compila":
+What's actually been tested, not just "it compiles":
 
-- ✅ **Agente y servidor compilan y pasan sus tests** en Windows (nativo) y
-  Linux (cross-compile amd64/arm64).
-- ✅ **Desplegado en un escenario real de dos máquinas en red**: un servidor
-  completo (Docker Compose: TimescaleDB + Redis + servidor + dashboard) y un
-  segundo agente en otra máquina distinta reportando por la red — registro,
-  heartbeat, streaming de métricas, listado de *todos* los contenedores
-  Docker del host, comando de reinicio de contenedor (dispatch → ejecución →
-  resultado reportado de vuelta) y el override de hostname, todo verificado
-  en vivo contra Postgres/TimescaleDB y Redis reales (no solo en memoria).
-- ✅ **Dashboard**: build de producción de Next.js (TypeScript estricto sin
-  errores) sirviendo el panel en tiempo real vía SSE contra el servidor real.
-- ⚠️ **El inspector de Kubelet no se ha probado contra un clúster real**: la
-  lógica de mapeo (estados, CPU/memoria) tiene tests unitarios con JSON
-  sintético, pero falta validar contra un kubelet de verdad y ajustar el RBAC
-  si el clúster tiene políticas más estrictas que las del chart de Helm.
-- ⚠️ **TLS/mTLS**: el código (servidor y cliente) está implementado y cubre
-  certificados de servidor y de cliente, pero no se ha generado un par de
-  certificados de prueba end-to-end — documentar el flujo de emisión (o
-  integrarlo con cert-manager en K8s) queda pendiente.
-- ⚠️ Las etiquetas (`labels`) de los contenedores Docker no se persisten
-  todavía en `pgstore`/`memstore` (se leen del engine pero se descartan al
-  guardar el snapshot); ampliarlo es sencillo si hace falta filtrar por ellas.
-- ⚠️ No hay instalador nativo para macOS (`launchd`); el binario compila y
-  corre igual, pero gestionar su ciclo de vida queda por tu cuenta.
-- ⚠️ CI (`.github/workflows/`) sigue patrones estándar de GitHub Actions,
-  pero conviene revisar su primera ejecución real al publicar el repositorio.
+- ✅ **Agent and server compile and pass their tests** on Windows (native)
+  and Linux (cross-compiled amd64/arm64).
+- ✅ **Deployed in a real two-machine networked scenario**: a full server
+  (Docker Compose: TimescaleDB + Redis + server + dashboard) and a second
+  agent on a different machine reporting over the network — registration,
+  heartbeat, metrics streaming, listing *every* Docker container on the
+  host, a container restart command (dispatch → execution → result
+  reported back), and the hostname override, all verified live against
+  real Postgres/TimescaleDB and Redis (not just in-memory).
+- ✅ **Dashboard**: Next.js production build (strict TypeScript, no errors)
+  serving the live panel over SSE against the real server.
+- ⚠️ **The Kubelet inspector hasn't been tested against a real cluster**:
+  the mapping logic (states, CPU/memory) has unit tests against synthetic
+  JSON, but it still needs validation against a real kubelet, and the RBAC
+  may need adjusting if the cluster has stricter policies than the Helm
+  chart's.
+- ⚠️ **TLS/mTLS**: the code (server and client) is implemented and covers
+  both server and client certificates, but no end-to-end test certificate
+  pair has been generated yet — documenting the issuance flow (or
+  integrating with cert-manager on K8s) is still pending.
+- ⚠️ Docker container labels aren't persisted yet in `pgstore`/`memstore`
+  (they're read from the engine but discarded when the snapshot is saved);
+  extending this is straightforward if filtering by them is ever needed.
+- ⚠️ There's no native macOS installer (`launchd`); the binary compiles and
+  runs the same, but managing its lifecycle is left up to you for now.
+- ⚠️ CI (`.github/workflows/`) follows standard GitHub Actions patterns,
+  but its first real run is worth double-checking now that the repository
+  is public.
 
-## Diferenciadores para la entrevista/portfolio
+## Portfolio/interview differentiators
 
-- **Seguridad por capas**: token compartido validado por interceptor en cada
-  RPC, mTLS opcional, IP pública derivada del transporte (no del payload),
-  comandos siempre iniciados por el agente.
-- **Cross-platform de verdad**: mismo binario de agente para Linux, Windows,
-  macOS y Kubernetes, con instaladores nativos para cada uno (`systemd`,
-  servicio Windows vía SCM, DaemonSet + Helm).
-- **Degradación explícita**: `auto/on/off` repetido en cada punto de
-  extensión (Docker, Redis, storage, runtime) en vez de asumir que la
-  infraestructura ideal siempre está disponible.
+- **Layered security**: a shared token validated by an interceptor on every
+  RPC, optional mTLS, public IP derived from the transport (not the
+  payload), commands always initiated by the agent.
+- **Genuinely cross-platform**: the same agent binary for Linux, Windows,
+  macOS, and Kubernetes, with native installers for each
+  (`systemd`, a Windows service via the SCM, DaemonSet + Helm).
+- **Explicit degradation**: `auto/on/off` repeated at every extension point
+  (Docker, Redis, storage, runtime) instead of assuming the ideal
+  infrastructure is always available.
 
-## Licencia
+## License
 
-[MIT](LICENSE) — úsalo, modifícalo y despliégalo libremente.
+[MIT](https://github.com/gsan-dev/fleetpulse/blob/main/LICENSE) — use it,
+modify it, and deploy it freely.
