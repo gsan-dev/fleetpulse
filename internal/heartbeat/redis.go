@@ -31,6 +31,37 @@ end
 return previous
 `
 
+// seedScript precarga el estado de un agente a partir de un last_seen_at ya
+// conocido. Nunca hace retroceder la puntuacion existente en el ZSET (si ya
+// hay una mas reciente -otra replica sigue viendo heartbeats de verdad- se
+// conserva esa), y el estado resultante se deriva siempre de la puntuacion
+// final frente al timeout, nunca se fuerza a 'online' a ciegas: asi un nodo
+// que ya estaba caido antes del reinicio del servidor queda Unreachable
+// desde el primer instante, sin pasar por una transicion que dispare una
+// alerta duplicada en el siguiente Sweep.
+const seedScript = `
+local agent = ARGV[1]
+local candidate = tonumber(ARGV[2])
+local now = tonumber(ARGV[3])
+local timeout = tonumber(ARGV[4])
+
+local current = redis.call('ZSCORE', KEYS[1], agent)
+local score = candidate
+if current and tonumber(current) > candidate then
+	score = tonumber(current)
+end
+redis.call('ZADD', KEYS[1], score, agent)
+
+-- >= para que el limite coincida exactamente con el de sweepScript, que usa
+-- ZRANGEBYSCORE('-inf', now-timeout) -- un rango inclusivo, no "> timeout".
+local state = 'online'
+if (now - score) >= timeout then
+	state = 'unreachable'
+end
+redis.call('HSET', KEYS[2], agent, state)
+return state
+`
+
 // sweepScript marca Unreachable a los agentes cuyo ultimo heartbeat supera el
 // umbral y que seguian marcados online, devolviendo solo esos (no los que ya
 // estaban Unreachable de un barrido anterior), para que el llamante dispare
@@ -102,6 +133,16 @@ func (b *RedisBackend) State(ctx context.Context, agentID string) (State, error)
 		return StateUnknown, fmt.Errorf("leer estado de %s: %w", agentID, err)
 	}
 	return parseState(raw), nil
+}
+
+func (b *RedisBackend) Seed(ctx context.Context, agentID string, lastSeen, now time.Time, timeout time.Duration) error {
+	_, err := b.client.Eval(ctx, seedScript, []string{zsetKey, hashKey},
+		agentID, lastSeen.UnixMilli(), now.UnixMilli(), timeout.Milliseconds(),
+	).Text()
+	if err != nil {
+		return fmt.Errorf("precargar heartbeat de %s: %w", agentID, err)
+	}
+	return nil
 }
 
 func parseState(raw string) State {

@@ -77,8 +77,13 @@ func (s *Store) UpsertNode(ctx context.Context, node store.Node) error {
 			cpu_cores = EXCLUDED.cpu_cores,
 			memory_total_bytes = EXCLUDED.memory_total_bytes,
 			boot_time = EXCLUDED.boot_time
-		-- registered_at y last_seen_at no se tocan: los gobiernan el primer
-		-- INSERT y el heartbeat respectivamente.
+		-- registered_at, last_seen_at y has_heartbeat no se tocan: los
+		-- gobiernan el primer INSERT (con su DEFAULT) y TouchNode
+		-- respectivamente. has_heartbeat es la unica fuente de verdad de "hay
+		-- un heartbeat real que precargar" que usa
+		-- cmd/fleetpulse-server.seedHeartbeats -no una comparacion de
+		-- timestamps, que se rompe si el reloj del agente esta desincronizado
+		-- del servidor.
 	`
 	_, err := s.pool.Exec(ctx, q,
 		node.AgentID, node.Hostname, node.OS, node.Platform, node.PlatformVersion, node.KernelVersion,
@@ -92,7 +97,7 @@ func (s *Store) UpsertNode(ctx context.Context, node store.Node) error {
 
 const nodeColumns = `agent_id, hostname, os, platform, platform_version, kernel_version,
 	arch, local_ip, public_ip, agent_version, cpu_cores, memory_total_bytes, boot_time,
-	registered_at, last_seen_at`
+	registered_at, last_seen_at, has_heartbeat`
 
 func (s *Store) GetNode(ctx context.Context, agentID string) (store.Node, error) {
 	rows, err := s.pool.Query(ctx, `SELECT `+nodeColumns+` FROM nodes WHERE agent_id = $1`, agentID)
@@ -126,7 +131,7 @@ func (s *Store) ListNodes(ctx context.Context) ([]store.Node, error) {
 }
 
 func (s *Store) TouchNode(ctx context.Context, agentID string, at time.Time) error {
-	tag, err := s.pool.Exec(ctx, `UPDATE nodes SET last_seen_at = $2 WHERE agent_id = $1`, agentID, at)
+	tag, err := s.pool.Exec(ctx, `UPDATE nodes SET last_seen_at = $2, has_heartbeat = true WHERE agent_id = $1`, agentID, at)
 	if err != nil {
 		return fmt.Errorf("actualizar heartbeat de %s: %w", agentID, err)
 	}

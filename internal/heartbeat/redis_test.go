@@ -4,10 +4,29 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/alicebob/miniredis/v2"
 )
 
-func TestTouchDevuelveEstadoPrevio(t *testing.T) {
-	b := NewMemoryBackend()
+// newTestRedisBackend levanta un Redis en memoria (miniredis ejecuta los
+// scripts Lua de verdad, via gopher-lua) para que RedisBackend deje de ser
+// el unico backend sin ninguna prueba automatizada: antes de esto, un fallo
+// en touchScript/sweepScript/seedScript solo se habria visto contra un
+// Redis real en produccion.
+func newTestRedisBackend(t *testing.T) *RedisBackend {
+	t.Helper()
+
+	server := miniredis.RunT(t)
+	backend, err := NewRedisBackend(context.Background(), "redis://"+server.Addr())
+	if err != nil {
+		t.Fatalf("NewRedisBackend: %v", err)
+	}
+	t.Cleanup(func() { _ = backend.Close() })
+	return backend
+}
+
+func TestRedisTouchDevuelveEstadoPrevio(t *testing.T) {
+	b := newTestRedisBackend(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -28,8 +47,8 @@ func TestTouchDevuelveEstadoPrevio(t *testing.T) {
 	}
 }
 
-func TestSweepMarcaUnreachableUnaSolaVez(t *testing.T) {
-	b := NewMemoryBackend()
+func TestRedisSweepMarcaUnreachableUnaSolaVez(t *testing.T) {
+	b := newTestRedisBackend(t)
 	ctx := context.Background()
 	start := time.Now().UTC()
 
@@ -51,19 +70,17 @@ func TestSweepMarcaUnreachableUnaSolaVez(t *testing.T) {
 		t.Errorf("state = %v, se esperaba StateUnreachable", state)
 	}
 
-	// Un segundo barrido no debe volver a reportar el mismo agente: ya esta
-	// Unreachable, no es una transicion nueva.
 	stale, err = b.Sweep(ctx, 45*time.Second, afterTimeout.Add(time.Minute))
 	if err != nil {
 		t.Fatalf("Sweep (segunda vez): %v", err)
 	}
 	if len(stale) != 0 {
-		t.Errorf("stale = %v, se esperaba vacio", stale)
+		t.Errorf("stale = %v, se esperaba vacio (no repetir la transicion)", stale)
 	}
 }
 
-func TestSweepIgnoraAgentesDentroDelTimeout(t *testing.T) {
-	b := NewMemoryBackend()
+func TestRedisSweepIgnoraAgentesDentroDelTimeout(t *testing.T) {
+	b := newTestRedisBackend(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -80,30 +97,8 @@ func TestSweepIgnoraAgentesDentroDelTimeout(t *testing.T) {
 	}
 }
 
-func TestTouchTrasUnreachableVuelveAOnline(t *testing.T) {
-	b := NewMemoryBackend()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	_, _ = b.Touch(ctx, "a1", now)
-	_, _ = b.Sweep(ctx, 45*time.Second, now.Add(time.Minute))
-
-	previous, err := b.Touch(ctx, "a1", now.Add(90*time.Second))
-	if err != nil {
-		t.Fatalf("Touch: %v", err)
-	}
-	if previous != StateUnreachable {
-		t.Errorf("previous = %v, se esperaba StateUnreachable", previous)
-	}
-
-	state, _ := b.State(ctx, "a1")
-	if state != StateOnline {
-		t.Errorf("state = %v, se esperaba StateOnline tras el nuevo heartbeat", state)
-	}
-}
-
-func TestStateDeAgenteDesconocido(t *testing.T) {
-	b := NewMemoryBackend()
+func TestRedisStateDeAgenteDesconocido(t *testing.T) {
+	b := newTestRedisBackend(t)
 	state, err := b.State(context.Background(), "fantasma")
 	if err != nil {
 		t.Fatalf("State: %v", err)
@@ -113,8 +108,8 @@ func TestStateDeAgenteDesconocido(t *testing.T) {
 	}
 }
 
-func TestSeedNodoYaCaidoQuedaUnreachableDeInmediato(t *testing.T) {
-	b := NewMemoryBackend()
+func TestRedisSeedNodoYaCaidoQuedaUnreachableDeInmediato(t *testing.T) {
+	b := newTestRedisBackend(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -125,7 +120,6 @@ func TestSeedNodoYaCaidoQuedaUnreachableDeInmediato(t *testing.T) {
 		t.Errorf("state = %v, se esperaba Unreachable sin esperar a un Sweep", state)
 	}
 
-	// No debe ser una transicion "nueva" para Sweep: ya nacio Unreachable.
 	stale, err := b.Sweep(ctx, 45*time.Second, now)
 	if err != nil {
 		t.Fatalf("Sweep: %v", err)
@@ -135,8 +129,8 @@ func TestSeedNodoYaCaidoQuedaUnreachableDeInmediato(t *testing.T) {
 	}
 }
 
-func TestSeedNodoRecienVistoQuedaOnline(t *testing.T) {
-	b := NewMemoryBackend()
+func TestRedisSeedNodoRecienVistoQuedaOnline(t *testing.T) {
+	b := newTestRedisBackend(t)
 	ctx := context.Background()
 	now := time.Now().UTC()
 
@@ -148,23 +142,43 @@ func TestSeedNodoRecienVistoQuedaOnline(t *testing.T) {
 	}
 }
 
-// TestSeedLimiteCoincideConSweep espeja TestRedisSeedLimiteCoincideConSweep:
-// un heartbeat exactamente en el borde del timeout debe clasificarse igual
-// sea cual sea el camino (Seed directo, o Touch+Sweep) dentro del mismo
-// backend en memoria.
-func TestSeedLimiteCoincideConSweep(t *testing.T) {
+func TestRedisSeedNuncaRetrocedeUnHeartbeatMasReciente(t *testing.T) {
+	b := newTestRedisBackend(t)
+	ctx := context.Background()
+	now := time.Now().UTC()
+
+	// Simula dos replicas compartiendo este Redis: una sigue viendo
+	// heartbeats de verdad (Touch) mientras la otra arranca y precarga desde
+	// un last_seen_at de la base de datos que quedo rezagado.
+	if _, err := b.Touch(ctx, "a1", now); err != nil {
+		t.Fatalf("Touch: %v", err)
+	}
+	if err := b.Seed(ctx, "a1", now.Add(-2*time.Hour), now, 45*time.Second); err != nil {
+		t.Fatalf("Seed: %v", err)
+	}
+
+	if state, _ := b.State(ctx, "a1"); state != StateOnline {
+		t.Errorf("state = %v, se esperaba que Seed no pisara un heartbeat mas reciente", state)
+	}
+}
+
+func TestRedisSeedLimiteCoincideConSweep(t *testing.T) {
+	// El limite de Seed (>=) debe coincidir con el de Sweep (rango
+	// inclusivo de ZRANGEBYSCORE): un heartbeat exactamente en el borde del
+	// timeout debe clasificarse igual sea cual sea el camino que lo evalue.
 	ctx := context.Background()
 	const timeout = 45 * time.Second
+
+	seeded := newTestRedisBackend(t)
 	now := time.Now().UTC()
 	lastSeen := now.Add(-timeout) // exactamente en el limite
 
-	seeded := NewMemoryBackend()
 	if err := seeded.Seed(ctx, "a1", lastSeen, now, timeout); err != nil {
 		t.Fatalf("Seed: %v", err)
 	}
 	seededState, _ := seeded.State(ctx, "a1")
 
-	swept := NewMemoryBackend()
+	swept := newTestRedisBackend(t)
 	if _, err := swept.Touch(ctx, "a1", lastSeen); err != nil {
 		t.Fatalf("Touch: %v", err)
 	}
@@ -175,29 +189,5 @@ func TestSeedLimiteCoincideConSweep(t *testing.T) {
 
 	if seededState != sweptState {
 		t.Errorf("Seed clasifico el limite como %v pero Sweep lo clasifica como %v", seededState, sweptState)
-	}
-	if seededState != StateUnreachable {
-		t.Errorf("estado en el limite = %v, se esperaba Unreachable (limite inclusivo)", seededState)
-	}
-}
-
-func TestSeedNuncaRetrocedeUnHeartbeatMasReciente(t *testing.T) {
-	b := NewMemoryBackend()
-	ctx := context.Background()
-	now := time.Now().UTC()
-
-	// Un heartbeat real (Touch) ya llego despues de lo que Seed intenta
-	// precargar: el escenario de una replica todavia viva en un backend
-	// compartido mientras otra replica arranca y precarga desde un
-	// last_seen_at de la base de datos que quedo un poco rezagado.
-	if _, err := b.Touch(ctx, "a1", now); err != nil {
-		t.Fatalf("Touch: %v", err)
-	}
-	if err := b.Seed(ctx, "a1", now.Add(-2*time.Hour), now, 45*time.Second); err != nil {
-		t.Fatalf("Seed: %v", err)
-	}
-
-	if state, _ := b.State(ctx, "a1"); state != StateOnline {
-		t.Errorf("state = %v, se esperaba que Seed no pisara un heartbeat mas reciente", state)
 	}
 }

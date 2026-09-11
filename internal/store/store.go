@@ -29,7 +29,20 @@ type Node struct {
 	MemoryTotal     uint64
 	BootTime        time.Time
 	RegisteredAt    time.Time
-	LastSeenAt      time.Time
+	// LastSeenAt es un timestamp de mejor esfuerzo para mostrar en el panel
+	// (arranca igual a RegisteredAt y lo mueve TouchNode); no es fiable para
+	// decidir si un nodo mando alguna vez un heartbeat de verdad, porque lo
+	// fija el reloj del AGENTE, no el del servidor: un agente con el reloj
+	// atrasado produciria LastSeenAt <= RegisteredAt para siempre aunque
+	// lleve semanas reportando bien. Para eso esta HasHeartbeat.
+	LastSeenAt time.Time
+	// HasHeartbeat es la unica fuente de verdad de "este nodo ha mandado
+	// alguna metrica real desde que se registro". Lo fija el servidor (no el
+	// agente) al procesar la primera rafaga, asi que no depende de ningun
+	// reloj externo. cmd/fleetpulse-server.seedHeartbeats se apoya en este
+	// campo, no en comparar timestamps, para decidir si hay un heartbeat que
+	// precargar al arrancar.
+	HasHeartbeat bool
 }
 
 // MetricPoint es una muestra de sistema ya aplanada para series temporales.
@@ -68,14 +81,18 @@ type Container struct {
 // el resto de paquetes; las implementaciones internamente pueden repartir el
 // trabajo entre varios ficheros.
 type Store interface {
-	// UpsertNode crea o actualiza la ficha de un nodo. No toca LastSeenAt:
-	// eso lo gobierna el heartbeat, que vive en un almacen aparte (memoria o
-	// Redis) por ser de escritura mucho mas frecuente.
+	// UpsertNode crea o actualiza la ficha de un nodo. En una reconexion (el
+	// agente ya existia) no toca LastSeenAt ni HasHeartbeat: esos dos los
+	// gobierna TouchNode, que vive aparte por ser de escritura mucho mas
+	// frecuente. En la creacion, LastSeenAt arranca igual a RegisteredAt
+	// (nunca a su cero-valor) como valor de exhibicion, y HasHeartbeat
+	// arranca en false.
 	UpsertNode(ctx context.Context, node Node) error
 	GetNode(ctx context.Context, agentID string) (Node, error)
 	ListNodes(ctx context.Context) ([]Node, error)
-	// TouchNode actualiza solo LastSeenAt, para persistir el heartbeat sin
-	// reescribir toda la ficha del nodo en cada rafaga de metricas.
+	// TouchNode actualiza LastSeenAt y marca HasHeartbeat=true, para
+	// persistir el heartbeat sin reescribir toda la ficha del nodo en cada
+	// rafaga de metricas.
 	TouchNode(ctx context.Context, agentID string, at time.Time) error
 
 	InsertMetric(ctx context.Context, point MetricPoint) error

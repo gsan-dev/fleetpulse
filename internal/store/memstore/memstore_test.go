@@ -23,13 +23,17 @@ func TestUpsertNodePreservaRegistroYHeartbeat(t *testing.T) {
 		t.Error("RegisteredAt no se establecio en el primer registro")
 	}
 
+	if first.HasHeartbeat {
+		t.Error("HasHeartbeat deberia ser false antes de cualquier TouchNode")
+	}
+
 	touchedAt := time.Now().UTC()
 	if err := s.TouchNode(ctx, "a1", touchedAt); err != nil {
 		t.Fatalf("TouchNode: %v", err)
 	}
 
 	// Un segundo registro (reconexion del agente) no debe resetear
-	// RegisteredAt ni LastSeenAt.
+	// RegisteredAt, LastSeenAt ni HasHeartbeat.
 	if err := s.UpsertNode(ctx, store.Node{AgentID: "a1", Hostname: "web-01-renamed"}); err != nil {
 		t.Fatalf("UpsertNode (reconexion): %v", err)
 	}
@@ -43,8 +47,36 @@ func TestUpsertNodePreservaRegistroYHeartbeat(t *testing.T) {
 	if !second.LastSeenAt.Equal(touchedAt) {
 		t.Errorf("LastSeenAt = %v, se esperaba %v", second.LastSeenAt, touchedAt)
 	}
+	if !second.HasHeartbeat {
+		t.Error("HasHeartbeat deberia seguir en true tras la reconexion")
+	}
 	if second.Hostname != "web-01-renamed" {
 		t.Errorf("Hostname no se actualizo: %q", second.Hostname)
+	}
+}
+
+// TestUpsertNodeNuevoIgualaLastSeenARegistered fija el mismo invariante que
+// pgstore (columna NOT NULL DEFAULT now(), nunca vacia): un nodo recien
+// registrado, sin ningun TouchNode todavia, tiene LastSeenAt igual a
+// RegisteredAt -no a un cero-valor-, como valor de exhibicion razonable para
+// el panel. La decision real de "hubo un heartbeat de verdad" la lleva
+// HasHeartbeat (ver TestUpsertNodePreservaRegistroYHeartbeat), no esta
+// comparacion de timestamps.
+func TestUpsertNodeNuevoIgualaLastSeenARegistered(t *testing.T) {
+	s := New()
+	if err := s.UpsertNode(context.Background(), store.Node{AgentID: "a1", Hostname: "web-01"}); err != nil {
+		t.Fatalf("UpsertNode: %v", err)
+	}
+
+	node, err := s.GetNode(context.Background(), "a1")
+	if err != nil {
+		t.Fatalf("GetNode: %v", err)
+	}
+	if node.LastSeenAt.IsZero() {
+		t.Error("LastSeenAt no deberia quedar a su cero-valor tras el primer registro")
+	}
+	if !node.LastSeenAt.Equal(node.RegisteredAt) {
+		t.Errorf("LastSeenAt = %v, se esperaba que igualase RegisteredAt = %v", node.LastSeenAt, node.RegisteredAt)
 	}
 }
 

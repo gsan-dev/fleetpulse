@@ -42,12 +42,23 @@ func (s *Store) UpsertNode(_ context.Context, node store.Node) error {
 
 	existing, ok := s.nodes[node.AgentID]
 	if ok {
-		// Conserva el momento del primer registro y el ultimo heartbeat
-		// conocido: un Register de reconexion no debe resetear ninguno.
+		// Conserva el momento del primer registro, el ultimo heartbeat
+		// conocido y si alguna vez hubo uno de verdad: un Register de
+		// reconexion (el agente se reinicia y vuelve a llamar Register) no
+		// debe resetear ninguno de los tres.
 		node.RegisteredAt = existing.RegisteredAt
 		node.LastSeenAt = existing.LastSeenAt
+		node.HasHeartbeat = existing.HasHeartbeat
 	} else {
+		// LastSeenAt arranca igual a RegisteredAt (no a su cero-valor): es
+		// solo un valor de exhibicion razonable para el panel mientras no
+		// haya heartbeat real, la misma convencion que pgstore (columna NOT
+		// NULL DEFAULT now(), nunca vacia). HasHeartbeat es quien de verdad
+		// dice si hubo un heartbeat: arranca en false y solo TouchNode lo
+		// pone a true.
 		node.RegisteredAt = time.Now().UTC()
+		node.LastSeenAt = node.RegisteredAt
+		node.HasHeartbeat = false
 	}
 	s.nodes[node.AgentID] = node
 	return nil
@@ -85,6 +96,7 @@ func (s *Store) TouchNode(_ context.Context, agentID string, at time.Time) error
 		return store.ErrNotFound
 	}
 	node.LastSeenAt = at
+	node.HasHeartbeat = true
 	s.nodes[agentID] = node
 	return nil
 }

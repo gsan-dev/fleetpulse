@@ -27,8 +27,29 @@ var statements = []string{
 		memory_total_bytes  BIGINT NOT NULL,
 		boot_time           TIMESTAMPTZ NOT NULL,
 		registered_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-		last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT now()
+		last_seen_at        TIMESTAMPTZ NOT NULL DEFAULT now(),
+		-- true en cuanto se procesa la primera rafaga de metricas real (ver
+		-- TouchNode); no se puede inferir comparando last_seen_at con
+		-- registered_at porque last_seen_at lo marca el reloj del AGENTE,
+		-- no el del servidor.
+		has_heartbeat       BOOLEAN NOT NULL DEFAULT false
 	)`,
+
+	// Instalaciones ya desplegadas antes de que existiera has_heartbeat: la
+	// CREATE TABLE de arriba no altera una tabla que ya existe, asi que hace
+	// falta anadir la columna aparte. Idempotente (no falla si ya esta).
+	`ALTER TABLE nodes ADD COLUMN IF NOT EXISTS has_heartbeat BOOLEAN NOT NULL DEFAULT false`,
+
+	// Backfill para los nodos que ya existian antes de que existiera esta
+	// columna: el ALTER de arriba les pone false a todos por defecto, y sin
+	// esto seedHeartbeats (cmd/fleetpulse-server) los saltaria en el primer
+	// reinicio tras la actualizacion -reproduciendo, para cualquier
+	// despliegue ya en marcha, el mismo bug que esta columna vino a arreglar-.
+	// last_seen_at <> registered_at es la senal de que alguna vez hubo un
+	// TouchNode real (los dos parten del mismo now() en el INSERT, ver
+	// UpsertNode). Idempotente y segura de re-ejecutar en cada arranque: una
+	// vez en true, la clausula WHERE deja de tocar esas filas.
+	`UPDATE nodes SET has_heartbeat = true WHERE has_heartbeat = false AND last_seen_at <> registered_at`,
 
 	`CREATE TABLE IF NOT EXISTS metrics (
 		agent_id             TEXT NOT NULL REFERENCES nodes(agent_id) ON DELETE CASCADE,

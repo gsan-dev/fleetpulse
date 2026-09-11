@@ -46,4 +46,21 @@ type Backend interface {
 	Sweep(ctx context.Context, timeout time.Duration, now time.Time) ([]string, error)
 	// State devuelve el estado actual de un agente (para la API del panel).
 	State(ctx context.Context, agentID string) (State, error)
+
+	// Seed inicializa el estado de un agente a partir de un last_seen_at ya
+	// conocido (el persistido en el almacen), sin pasar por la logica de
+	// transicion de Touch/Sweep: es solo para precargar el backend al
+	// arrancar el servidor, nunca para un heartbeat real.
+	//
+	// El estado resultante se deriva directamente de `now - lastSeen` frente
+	// a `timeout`: si ya esta vencido, el agente queda Unreachable desde el
+	// primer instante (no hace falta esperar al primer Sweep, y ese Sweep no
+	// lo reporta como una transicion nueva, asi que no se duplica ninguna
+	// alerta para un nodo que ya se sabia caido antes del reinicio).
+	//
+	// Nunca hace retroceder un last_seen_at mas reciente que ya estuviera
+	// registrado: en un backend compartido entre varias replicas (Redis),
+	// una replica reiniciandose no debe poder marcar Unreachable a un nodo
+	// que otra replica, todavia viva, sigue viendo sano.
+	Seed(ctx context.Context, agentID string, lastSeen, now time.Time, timeout time.Duration) error
 }

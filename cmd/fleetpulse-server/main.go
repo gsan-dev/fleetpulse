@@ -25,6 +25,7 @@ import (
 	"github.com/gdev/fleetpulse/internal/grpcserver"
 	"github.com/gdev/fleetpulse/internal/heartbeat"
 	"github.com/gdev/fleetpulse/internal/hub"
+	"github.com/gdev/fleetpulse/internal/parallel"
 	"github.com/gdev/fleetpulse/internal/rpcauth"
 	"github.com/gdev/fleetpulse/internal/serverconfig"
 	"github.com/gdev/fleetpulse/internal/store"
@@ -73,7 +74,7 @@ func run(args []string) error {
 	// caido no tiene entrada que barrer y se queda marcado "Saludable" para
 	// siempre en el panel, con el ultimo last_seen_at que quedo persistido,
 	// en vez de pasar a "Unreachable" pasado el timeout.
-	seedHeartbeats(ctx, st, heartbeats, log)
+	seedHeartbeats(ctx, st, heartbeats, time.Now().UTC(), cfg.HeartbeatTimeout, log)
 
 	alerter := buildAlerter(cfg, log)
 	watchdog := heartbeat.NewWatchdog(heartbeats, alerter, func(ctx context.Context, agentID string) (string, error) {
@@ -159,23 +160,48 @@ func openHeartbeatBackend(ctx context.Context, cfg *serverconfig.Config) (heartb
 	return backend, func() { _ = backend.Close() }, nil
 }
 
+// seedConcurrency acota cuantas llamadas Seed van a la vez contra el backend
+// de heartbeat. Con Redis cada una es un viaje de red; en una flota de miles
+// de nodos, hacerlo en serie retrasaria el arranque del servidor (y con el,
+// cualquier readiness probe) en proporcion al tamano de la flota.
+const seedConcurrency = 32
+
 // seedHeartbeats precarga el backend de heartbeat con el last_seen_at
 // persistido de cada nodo conocido. El backend arranca siempre vacio (en
 // memoria o en un Redis que se acaba de reiniciar), y heartbeat.Sweep solo
 // puede marcar Unreachable a los agentes que tienen entrada: sin este
-// precargado, un nodo que de verdad lleva horas caido se queda "Saludable"
-// hasta que (si es que llega a hacerlo) vuelva a conectar.
-func seedHeartbeats(ctx context.Context, st store.Store, heartbeats heartbeat.Backend, log *slog.Logger) {
+// precargado, un nodo que de verdad lleva horas caido se quedaria
+// "Saludable" hasta que (si es que llega a hacerlo) volviera a conectar.
+//
+// Usa Backend.Seed, no Touch: Seed deriva el estado directamente de
+// `lastSeen` frente a `timeout`, asi que un nodo ya caido desde antes del
+// reinicio queda Unreachable desde el primer instante en vez de pasar
+// brevemente por Online y disparar una alerta duplicada en el siguiente
+// Sweep para algo que ya se sabia.
+func seedHeartbeats(ctx context.Context, st store.Store, heartbeats heartbeat.Backend, now time.Time, timeout time.Duration, log *slog.Logger) {
 	nodes, err := st.ListNodes(ctx)
 	if err != nil {
 		log.Warn("no se pudo precargar el heartbeat desde el almacen", "error", err)
 		return
 	}
-	for _, n := range nodes {
-		if _, err := heartbeats.Touch(ctx, n.AgentID, n.LastSeenAt); err != nil {
+
+	parallel.ForEach(ctx, seedConcurrency, nodes, func(n store.Node) {
+		// Un nodo recien registrado que todavia no mando su primera rafaga
+		// no tiene ningun heartbeat real que precargar. HasHeartbeat es la
+		// unica senal que se usa para esto -no una comparacion de
+		// timestamps (LastSeenAt lo marca el reloj del AGENTE, no el del
+		// servidor: un agente con el reloj desincronizado rompería esa
+		// comparacion, quiza para siempre). Si se sembrase aun asi, Seed lo
+		// veria "vencido" desde el registro y lo marcaria Unreachable de
+		// inmediato, y su primera metrica de verdad dispararia una alerta de
+		// "recuperado" para un nodo que nunca estuvo caido.
+		if !n.HasHeartbeat {
+			return
+		}
+		if err := heartbeats.Seed(ctx, n.AgentID, n.LastSeenAt, now, timeout); err != nil {
 			log.Warn("no se pudo inicializar el heartbeat de un nodo", "agent_id", n.AgentID, "error", err)
 		}
-	}
+	})
 }
 
 func buildAlerter(cfg *serverconfig.Config, log *slog.Logger) alert.Alerter {

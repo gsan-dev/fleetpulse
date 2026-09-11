@@ -8,12 +8,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
+	"github.com/gdev/fleetpulse/internal/parallel"
 )
 
 // statsWorkers limita cuantos contenedores se consultan a la vez. Cada lectura
@@ -87,48 +87,31 @@ func (d *DockerInspector) Containers(ctx context.Context) ([]ContainerSnapshot, 
 // Un contenedor que falle se queda con sus metricas a cero en lugar de tumbar
 // la muestra entera: el panel prefiere datos parciales a un hueco.
 func (d *DockerInspector) fillStats(ctx context.Context, snapshots []ContainerSnapshot) {
-	indices := make(chan int)
-	var wg sync.WaitGroup
-
-	for range statsWorkers {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for i := range indices {
-				if info, err := d.cli.ContainerInspect(ctx, snapshots[i].ID); err == nil {
-					snapshots[i].RestartCount = info.RestartCount
-					if started, err := time.Parse(time.RFC3339Nano, info.State.StartedAt); err == nil {
-						snapshots[i].StartedAt = started
-					}
-				}
-
-				stats, err := d.containerStats(ctx, snapshots[i].ID)
-				if err != nil {
-					continue
-				}
-				snapshots[i].CPUPercent = stats.cpuPercent
-				snapshots[i].MemoryBytes = stats.memoryBytes
-				snapshots[i].MemoryLimit = stats.memoryLimit
-				snapshots[i].RxBytes = stats.rxBytes
-				snapshots[i].TxBytes = stats.txBytes
-			}
-		}()
+	running := make([]int, 0, len(snapshots))
+	for i := range snapshots {
+		if strings.EqualFold(snapshots[i].State, "running") {
+			running = append(running, i)
+		}
 	}
 
-	for i := range snapshots {
-		if !strings.EqualFold(snapshots[i].State, "running") {
-			continue
+	parallel.ForEach(ctx, statsWorkers, running, func(i int) {
+		if info, err := d.cli.ContainerInspect(ctx, snapshots[i].ID); err == nil {
+			snapshots[i].RestartCount = info.RestartCount
+			if started, err := time.Parse(time.RFC3339Nano, info.State.StartedAt); err == nil {
+				snapshots[i].StartedAt = started
+			}
 		}
-		select {
-		case indices <- i:
-		case <-ctx.Done():
-			close(indices)
-			wg.Wait()
+
+		stats, err := d.containerStats(ctx, snapshots[i].ID)
+		if err != nil {
 			return
 		}
-	}
-	close(indices)
-	wg.Wait()
+		snapshots[i].CPUPercent = stats.cpuPercent
+		snapshots[i].MemoryBytes = stats.memoryBytes
+		snapshots[i].MemoryLimit = stats.memoryLimit
+		snapshots[i].RxBytes = stats.rxBytes
+		snapshots[i].TxBytes = stats.txBytes
+	})
 }
 
 type containerStats struct {
