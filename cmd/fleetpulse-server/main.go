@@ -68,6 +68,13 @@ func run(args []string) error {
 	}
 	defer closeHeartbeats()
 
+	// Sin esto, un reinicio del servidor (o de Redis, en despliegues con
+	// backend compartido) deja el heartbeat en blanco: un nodo realmente
+	// caido no tiene entrada que barrer y se queda marcado "Saludable" para
+	// siempre en el panel, con el ultimo last_seen_at que quedo persistido,
+	// en vez de pasar a "Unreachable" pasado el timeout.
+	seedHeartbeats(ctx, st, heartbeats, log)
+
 	alerter := buildAlerter(cfg, log)
 	watchdog := heartbeat.NewWatchdog(heartbeats, alerter, func(ctx context.Context, agentID string) (string, error) {
 		node, err := st.GetNode(ctx, agentID)
@@ -150,6 +157,25 @@ func openHeartbeatBackend(ctx context.Context, cfg *serverconfig.Config) (heartb
 		return nil, nil, fmt.Errorf("abrir redis: %w", err)
 	}
 	return backend, func() { _ = backend.Close() }, nil
+}
+
+// seedHeartbeats precarga el backend de heartbeat con el last_seen_at
+// persistido de cada nodo conocido. El backend arranca siempre vacio (en
+// memoria o en un Redis que se acaba de reiniciar), y heartbeat.Sweep solo
+// puede marcar Unreachable a los agentes que tienen entrada: sin este
+// precargado, un nodo que de verdad lleva horas caido se queda "Saludable"
+// hasta que (si es que llega a hacerlo) vuelva a conectar.
+func seedHeartbeats(ctx context.Context, st store.Store, heartbeats heartbeat.Backend, log *slog.Logger) {
+	nodes, err := st.ListNodes(ctx)
+	if err != nil {
+		log.Warn("no se pudo precargar el heartbeat desde el almacen", "error", err)
+		return
+	}
+	for _, n := range nodes {
+		if _, err := heartbeats.Touch(ctx, n.AgentID, n.LastSeenAt); err != nil {
+			log.Warn("no se pudo inicializar el heartbeat de un nodo", "agent_id", n.AgentID, "error", err)
+		}
+	}
 }
 
 func buildAlerter(cfg *serverconfig.Config, log *slog.Logger) alert.Alerter {
