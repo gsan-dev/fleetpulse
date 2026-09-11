@@ -1,0 +1,42 @@
+# Valores por defecto de fleetpulse-agent. Sobrescribe con -f values-prod.yaml
+# o --set en el despliegue real.
+
+image:
+  repository: ghcr.io/gdev/fleetpulse-agent
+  tag: latest
+  pullPolicy: IfNotPresent
+
+# server.address y server.tokenSecretName son obligatorios: no hay valor por
+# defecto razonable para el recolector central de cada usuario.
+server:
+  address: "" # host:puerto gRPC del recolector, p.ej. fleetpulse.tu-dominio.com:50051
+  # Nombre de un Secret ya existente en el namespace con la clave "token"
+  # (el AGENT_TOKEN). Crearlo aparte evita que el token quede en `helm history`.
+  tokenSecretName: ""
+  tls:
+    enabled: false
+    # Nombre de un Secret con las claves ca.crt (y opcionalmente tls.crt/tls.key
+    # para mTLS) que se monta en el agente.
+    secretName: ""
+
+agent:
+  interval: 15s
+  logLevel: info
+
+resources:
+  requests:
+    cpu: 10m
+    memory: 24Mi
+  limits:
+    cpu: 100m
+    memory: 64Mi
+
+tolerations:
+  # Por defecto se programa en todos los nodos, incluidos los control-plane:
+  # una flota quiere ver tambien la salud de los nodos maestros.
+  - operator: Exists
+    effect: NoSchedule
+
+nodeSelector: {}
+annotations: {}
+podAnnotations: {}

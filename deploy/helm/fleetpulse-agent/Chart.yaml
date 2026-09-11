@@ -1,0 +1,12 @@
+apiVersion: v2
+name: fleetpulse-agent
+description: Agente FleetPulse como DaemonSet, leyendo metricas de Pod/Node via la API del kubelet.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/gdev/fleetpulse
+keywords:
+  - monitoring
+  - observability
+  - kubernetes
+  - daemonset

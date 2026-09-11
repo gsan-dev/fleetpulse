@@ -1,0 +1,18 @@
+bin/
+dist/
+*.exe
+*.test
+*.out
+
+# Estado local del agente durante pruebas
+agent-id
+.env
+.env.local
+
+# Dashboard (web/ tiene su propio .gitignore para node_modules/.next, pero
+# esto cubre un `npm install` accidental lanzado desde la raiz).
+node_modules/
+
+# Configuracion local del asistente/editor: especifica de esta maquina, no
+# del proyecto.
+.claude/

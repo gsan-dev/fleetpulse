@@ -1,0 +1,168 @@
+syntax = "proto3";
+
+package fleetpulse.v1;
+
+option go_package = "github.com/gdev/fleetpulse/gen/fleetpulse/v1;fleetpulsev1";
+
+// Collector es el servicio central de ingesta. El agente se registra una vez
+// (Auto-Discovery) y a partir de ahi abre un stream de metricas que actua
+// tambien como heartbeat para el watchdog del servidor.
+service CollectorService {
+  // Register da de alta el nodo a partir del AGENT_TOKEN y devuelve el
+  // agent_id definitivo mas la cadencia de envio que impone el servidor.
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+
+  // PushMetrics transmite rafagas de telemetria. El servidor responde una
+  // unica vez al cerrarse el stream con el resumen de lo ingerido.
+  rpc PushMetrics(stream MetricPayload) returns (PushMetricsAck);
+
+  // StreamCommands lo abre el agente al arrancar y lo mantiene vivo mientras
+  // dure el proceso: es el unico canal por el que el servidor puede empujar
+  // acciones (reinicio de contenedor, logs bajo demanda) sin que el agente
+  // tenga que exponer ningun puerto entrante, algo clave detras de NAT/firewall.
+  rpc StreamCommands(CommandSubscribe) returns (stream Command);
+
+  // ReportCommandResult devuelve el resultado de un Command ya ejecutado.
+  rpc ReportCommandResult(CommandResult) returns (CommandResultAck);
+}
+
+// NodeInfo es la huella del nodo que se envia en el registro.
+message NodeInfo {
+  string hostname = 1;
+  string os = 2;               // linux, windows, darwin
+  string platform = 3;         // debian, ubuntu, alpine...
+  string platform_version = 4;
+  string kernel_version = 5;
+  string arch = 6;             // amd64, arm64
+  string local_ip = 7;
+  string agent_version = 8;
+  uint32 cpu_cores = 9;
+  uint64 memory_total_bytes = 10;
+  int64 boot_time = 11;        // unix epoch en segundos
+  // La IP publica no la manda el agente: el servidor la deriva de la
+  // direccion del peer gRPC para que no pueda ser falseada por el cliente.
+}
+
+message RegisterRequest {
+  string token = 1;
+  // agent_id previo cuando el agente ya se habia registrado antes (reinicio,
+  // actualizacion del binario). Vacio en el primer arranque.
+  string agent_id = 2;
+  NodeInfo node = 3;
+}
+
+message RegisterResponse {
+  string agent_id = 1;
+  uint32 heartbeat_interval_seconds = 2;
+  bool accepted = 3;
+  string message = 4;
+}
+
+message PushMetricsAck {
+  uint64 accepted_payloads = 1;
+  int64 server_time = 2; // unix epoch en milisegundos
+}
+
+message MetricPayload {
+  string agent_id = 1;
+  int64 timestamp = 2; // unix epoch en milisegundos
+  SystemMetrics system = 3;
+  repeated ContainerMetrics containers = 4;
+}
+
+message SystemMetrics {
+  float cpu_usage_percent = 1;
+  uint64 memory_used_bytes = 2;
+  uint64 memory_total_bytes = 3;
+  // Uso del volumen raiz. El detalle por punto de montaje va en `disks`.
+  float disk_usage_percent = 4;
+
+  repeated DiskMetrics disks = 5;
+  NetworkMetrics network = 6;
+  LoadAverage load = 7;
+  uint64 uptime_seconds = 8;
+  uint64 memory_available_bytes = 9;
+  uint64 swap_used_bytes = 10;
+  uint64 swap_total_bytes = 11;
+}
+
+message DiskMetrics {
+  string device = 1;
+  string mountpoint = 2;
+  string fstype = 3;
+  uint64 total_bytes = 4;
+  uint64 used_bytes = 5;
+  float usage_percent = 6;
+  uint64 read_bytes_per_second = 7;
+  uint64 write_bytes_per_second = 8;
+}
+
+message NetworkMetrics {
+  uint64 rx_bytes_per_second = 1;
+  uint64 tx_bytes_per_second = 2;
+  uint64 rx_bytes_total = 3;
+  uint64 tx_bytes_total = 4;
+}
+
+message LoadAverage {
+  float load1 = 1;
+  float load5 = 2;
+  float load15 = 3;
+}
+
+message ContainerMetrics {
+  string id = 1;
+  string name = 2;
+  string image = 3;
+  string status = 4; // running, paused, restarting, exited...
+  float cpu_percent = 5;
+  uint64 memory_bytes = 6;
+
+  uint64 memory_limit_bytes = 7;
+  string state = 8;    // campo State crudo del engine
+  int64 started_at = 9; // unix epoch en segundos
+  uint32 restart_count = 10;
+  ContainerNetwork network = 11;
+  repeated string labels = 12; // pares "clave=valor" ya aplanados
+}
+
+message ContainerNetwork {
+  uint64 rx_bytes = 1;
+  uint64 tx_bytes = 2;
+}
+
+// CommandSubscribe abre el stream de comandos para un agente ya registrado.
+message CommandSubscribe {
+  string agent_id = 1;
+}
+
+// Command es una accion que el panel dispara sobre un nodo concreto.
+message Command {
+  string command_id = 1;
+  oneof action {
+    RestartContainer restart_container = 2;
+    FetchContainerLogs fetch_container_logs = 3;
+  }
+}
+
+message RestartContainer {
+  string container_id = 1;
+}
+
+message FetchContainerLogs {
+  string container_id = 1;
+  uint32 tail_lines = 2;
+}
+
+// CommandResult es la respuesta asincrona del agente a un Command. El
+// servidor la correlaciona con el command_id para desbloquear al llamante
+// HTTP que esta esperando (p.ej. el visor de logs).
+message CommandResult {
+  string agent_id = 1;
+  string command_id = 2;
+  bool success = 3;
+  string error = 4;
+  repeated string log_lines = 5; // solo relevante en fetch_container_logs
+}
+
+message CommandResultAck {}

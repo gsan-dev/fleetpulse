@@ -1,0 +1,26 @@
+# Imagen del servidor recolector (cmd/fleetpulse-server). Build multi-stage:
+# compila en golang:alpine y ejecuta en distroless, sin shell ni gestor de
+# paquetes en la imagen final.
+#
+#   docker build -f Dockerfile.server -t fleetpulse-server .
+
+FROM golang:1.26-alpine AS build
+WORKDIR /src
+
+# Capa de dependencias separada del codigo para que `docker build` no vuelva
+# a descargar modulos en cada cambio de un .go.
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/fleetpulse-server ./cmd/fleetpulse-server
+
+FROM gcr.io/distroless/static-debian12:nonroot
+COPY --from=build /out/fleetpulse-server /usr/local/bin/fleetpulse-server
+
+USER nonroot:nonroot
+EXPOSE 50051 8080
+ENTRYPOINT ["/usr/local/bin/fleetpulse-server"]

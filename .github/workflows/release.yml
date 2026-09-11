@@ -1,0 +1,88 @@
+name: Release
+
+# Se dispara con un tag "vX.Y.Z": compila los binarios del agente y del
+# servidor para cada plataforma soportada, los sube a la Release de GitHub, y
+# publica las imagenes de contenedor del servidor y el dashboard en GHCR.
+on:
+  push:
+    tags: ["v*.*.*"]
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  binaries:
+    name: Binarios
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Compilar agente (linux amd64/arm64, windows amd64) y servidor (linux amd64)
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          VERSION="${GITHUB_REF_NAME}"
+
+          build_agent() {
+            local goos=$1 goarch=$2 ext=$3
+            CGO_ENABLED=0 GOOS="$goos" GOARCH="$goarch" \
+              go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+              -o "dist/fleetpulse-agent-${goos}-${goarch}${ext}" ./cmd/fleetpulse-agent
+          }
+          build_agent linux amd64 ""
+          build_agent linux arm64 ""
+          build_agent windows amd64 ".exe"
+
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+            go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+            -o dist/fleetpulse-server-linux-amd64 ./cmd/fleetpulse-server
+
+          cd dist && sha256sum * > checksums.txt
+
+      - name: Publicar en la Release de GitHub
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+
+  images:
+    name: Imagenes de contenedor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Servidor
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.server
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fleetpulse-server:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/fleetpulse-server:latest
+
+      - name: Dashboard
+        uses: docker/build-push-action@v6
+        with:
+          context: web
+          push: true
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.DASHBOARD_API_URL }}
+          tags: |
+            ghcr.io/${{ github.repository_owner }}/fleetpulse-web:${{ github.ref_name }}
+            ghcr.io/${{ github.repository_owner }}/fleetpulse-web:latest

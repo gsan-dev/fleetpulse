@@ -1,0 +1,101 @@
+# Stack de demostracion / desarrollo local: TimescaleDB + Redis + el
+# servidor recolector + el dashboard, y un agente de ejemplo monitorizando
+# la propia maquina Docker. No pensado para producción tal cual (contraseñas
+# de ejemplo, sin TLS): ver README para un despliegue real.
+#
+#   docker compose up --build
+#   -> Dashboard en http://localhost:3000
+#
+name: fleetpulse
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: fleetpulse
+      POSTGRES_USER: fleetpulse
+      POSTGRES_PASSWORD: fleetpulse
+    volumes:
+      - timescaledb-data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fleetpulse"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile.server
+    restart: unless-stopped
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://fleetpulse:fleetpulse@timescaledb:5432/fleetpulse?sslmode=disable
+      REDIS_URL: redis://redis:6379/0
+      AGENT_TOKENS: demo-token
+      FLEETPULSE_DASHBOARD_TOKEN: ""
+      FLEETPULSE_CORS_ORIGIN: "*"
+      FLEETPULSE_LOG_LEVEL: info
+    ports:
+      - "50051:50051" # gRPC (agentes)
+      - "8080:8080" # API HTTP/SSE (dashboard)
+
+  web:
+    build:
+      context: web
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: http://localhost:8080
+    restart: unless-stopped
+    depends_on:
+      - server
+    ports:
+      - "3000:3000"
+
+  # Agente de ejemplo monitorizando el propio host Docker. Requiere Linux
+  # (o Docker Desktop con integracion de socket) para el bind mount del
+  # socket; en un despliegue real el agente se instala en cada nodo con
+  # install/install.sh o install/install.ps1, no aqui.
+  agent-demo:
+    build:
+      context: .
+      dockerfile: cmd/fleetpulse-agent/Dockerfile
+    restart: unless-stopped
+    depends_on:
+      - server
+    environment:
+      FLEETPULSE_SERVER: server:50051
+      AGENT_TOKEN: demo-token
+      FLEETPULSE_INTERVAL: 10s
+      FLEETPULSE_LOG_LEVEL: info
+      # Sin esto el panel mostraria el ID del contenedor como nombre del nodo
+      # (asi es como Docker le pone el hostname por defecto), no el de la
+      # maquina real. ${HOSTNAME:-...} toma el del shell donde se hace
+      # `docker compose up`; en la mayoria de Linux basta, pero conviene
+      # comprobarlo (`echo $HOSTNAME`) o fijarlo a mano si sale vacio.
+      FLEETPULSE_HOSTNAME: ${HOSTNAME:-fleetpulse-host}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - agent-demo-state:/var/lib/fleetpulse
+
+volumes:
+  timescaledb-data:
+  agent-demo-state:

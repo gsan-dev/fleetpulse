@@ -1,0 +1,91 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: {{ include "fleetpulse-agent.name" . }}
+  labels:
+    {{- include "fleetpulse-agent.labels" . | nindent 4 }}
+  {{- with .Values.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "fleetpulse-agent.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        {{- include "fleetpulse-agent.labels" . | nindent 8 }}
+      {{- with .Values.podAnnotations }}
+      annotations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ include "fleetpulse-agent.name" . }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: agent
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args:
+            - "--server={{ required "server.address es obligatorio" .Values.server.address }}"
+            - "--interval={{ .Values.agent.interval }}"
+            - "--log-level={{ .Values.agent.logLevel }}"
+            - "--runtime=kubernetes"
+            - "--docker=off"
+            - "--state-dir=/var/lib/fleetpulse"
+            {{- if .Values.server.tls.enabled }}
+            - "--tls-ca=/etc/fleetpulse/tls/ca.crt"
+            {{- end }}
+          env:
+            - name: AGENT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: {{ required "server.tokenSecretName es obligatorio" .Values.server.tokenSecretName }}
+                  key: token
+            # NODE_IP y NODE_NAME via Downward API: el kubelet solo escucha
+            # en la IP del nodo, no hay forma de descubrirla desde dentro del
+            # contenedor sin esto (ver internal/collector/kubelet.go).
+            - name: NODE_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.hostIP
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          volumeMounts:
+            - name: state
+              mountPath: /var/lib/fleetpulse
+            {{- if .Values.server.tls.enabled }}
+            - name: server-tls
+              mountPath: /etc/fleetpulse/tls
+              readOnly: true
+            {{- end }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 65532
+      volumes:
+        # emptyDir: el agent_id persiste mientras el Pod no se reprograme a
+        # otro nodo (reinicios normales del contenedor lo conservan). Un
+        # nuevo agent_id tras una reprogramacion no es grave: el servidor lo
+        # trata como un nodo nuevo via Register, ver internal/identity.
+        - name: state
+          emptyDir: {}
+        {{- if .Values.server.tls.enabled }}
+        - name: server-tls
+          secret:
+            secretName: {{ required "server.tls.secretName es obligatorio si server.tls.enabled=true" .Values.server.tls.secretName }}
+        {{- end }}
